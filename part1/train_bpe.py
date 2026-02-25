@@ -198,115 +198,79 @@ def train_bpe(
             forbidden_substrings.add(special_bytes[:i])
 
     # TODO: Implement BPE training
-    vocab: dict[int, bytes] = {}
-    for token in special_tokens:
-        vocab[len(vocab)] = token.encode("utf-8")
+    token_table: dict[int, bytes] = {}
+    token_idx = 0
+
+    for tok in special_tokens:
+        token_table[token_idx] = tok.encode("utf-8")
+        token_idx += 1
+
     for b in range(256):
-        vocab[len(vocab)] = BYTE_TOKENS[b]
+        token_table[token_idx] = bytes([b])
+        token_idx += 1
 
-    # 2. Word frequency counting
-    # Cache pre-token conversions since corpora contain many repeated tokens.
-    word_freqs: Counter[tuple[bytes, ...]] = Counter()
-    token_cache: dict[str, tuple[bytes, ...] | None] = {}
+    if vocab_size <= len(token_table):
+        return {k: v for k, v in list(token_table.items())[:vocab_size]}, []
 
-    for token in pre_tokenize(text, special_tokens):
-        cached = token_cache.get(token)
-        if cached is not None:
-            word_freqs[cached] += 1
-            continue
-        if token in token_cache:  # Cached "skip" marker
+    sequence_counts: Counter[tuple[bytes, ...]] = Counter()
+
+    for token_str in pre_tokenize(text, special_tokens):
+        if not token_str:
             continue
 
-        token_bytes = token.encode("utf-8")
+        b = token_str.encode("utf-8")
 
-        # Skip words containing forbidden substrings.
-        # Keep this check semantically identical to the baseline implementation.
-        skip_token = False
-        for forbidden in forbidden_substrings:
-            if forbidden in token_bytes:
-                skip_token = True
-                break
-        if skip_token:
-            token_cache[token] = None
+        if any(fs in b for fs in forbidden_substrings):
             continue
 
-        word = tuple(BYTE_TOKENS[b] for b in token_bytes)
-        if word:
-            token_cache[token] = word
-            word_freqs[word] += 1
-        else:
-            token_cache[token] = None
+        sequence_counts[tuple(bytes([x]) for x in b)] += 1
+
+    pair_counts: Counter[tuple[bytes, bytes]] = Counter()
+
+    for word, freq in sequence_counts.items():
+        for pair in get_pairs(word):
+            if pair[0] + pair[1] not in forbidden_substrings:
+                pair_counts[pair] += freq
 
     merges: list[tuple[bytes, bytes]] = []
+    existing_tokens = set(token_table.values())
 
-    # Build pair statistics once, then update incrementally after each merge.
-    word_pairs: dict[tuple[bytes, ...], set[tuple[bytes, bytes]]] = {}
-    pair_counts: Counter[tuple[bytes, bytes]] = Counter()
-    pair_to_words: dict[tuple[bytes, bytes], set[tuple[bytes, ...]]] = {}
-
-    for word, freq in word_freqs.items():
-        pairs = get_pairs(word)
-        word_pairs[word] = pairs
-        for pair in pairs:
-            pair_counts[pair] += freq
-            pair_to_words.setdefault(pair, set()).add(word)
-
-    # 3. BPE merge loop
-    while len(vocab) < vocab_size and pair_counts:
-        # Select best pair: highest frequency, lexicographically largest on ties.
+    while len(token_table) < vocab_size and pair_counts:
+        # best pair (deterministic)
         best_pair = max(pair_counts, key=lambda p: (pair_counts[p], p))
-        if pair_counts[best_pair] <= 0:
-            break
 
-        merges.append(best_pair)
-        vocab[len(vocab)] = best_pair[0] + best_pair[1]
+        new_token = best_pair[0] + best_pair[1]
 
-        # Only words containing best_pair can change.
-        affected_words = list(pair_to_words.get(best_pair, ()))
-        if not affected_words:
-            pair_counts.pop(best_pair, None)
-            pair_to_words.pop(best_pair, None)
+        if new_token in existing_tokens:
+            del pair_counts[best_pair]
             continue
 
-        merged_word_freqs: Counter[tuple[bytes, ...]] = Counter()
+        # add to vocab
+        token_table[len(token_table)] = new_token
+        existing_tokens.add(new_token)
+        merges.append(best_pair)
 
-        # Remove old pair contributions from affected words.
-        for old_word in affected_words:
-            freq = word_freqs.pop(old_word, 0)
-            if freq == 0:
+        new_sequence_counts: Counter[tuple[bytes, ...]] = Counter()
+
+        for word, freq in sequence_counts.items():
+            if best_pair not in get_pairs(word):
+                new_sequence_counts[word] += freq
                 continue
 
-            old_pairs = word_pairs.pop(old_word, set())
-            for pair in old_pairs:
-                new_count = pair_counts.get(pair, 0) - freq
-                if new_count > 0:
-                    pair_counts[pair] = new_count
-                else:
+            # remove old pair contributions
+            for pair in get_pairs(word):
+                pair_counts[pair] -= freq
+                if pair_counts[pair] <= 0:
                     pair_counts.pop(pair, None)
 
-                words_for_pair = pair_to_words.get(pair)
-                if words_for_pair is not None:
-                    words_for_pair.discard(old_word)
-                    if not words_for_pair:
-                        pair_to_words.pop(pair, None)
+            merged_word = merge_word(word, best_pair)
+            new_sequence_counts[merged_word] += freq
 
-            merged_word = merge_word(old_word, best_pair)
-            merged_word_freqs[merged_word] += freq
+            # add new pair contributions
+            for pair in get_pairs(merged_word):
+                if pair[0] + pair[1] not in forbidden_substrings:
+                    pair_counts[pair] += freq
 
-        # Add merged words and their pair contributions.
-        for new_word, add_freq in merged_word_freqs.items():
-            prev_freq = word_freqs.get(new_word, 0)
-            word_freqs[new_word] = prev_freq + add_freq
+        sequence_counts = new_sequence_counts
 
-            if prev_freq == 0:
-                pairs = get_pairs(new_word)
-                word_pairs[new_word] = pairs
-                for pair in pairs:
-                    pair_to_words.setdefault(pair, set()).add(new_word)
-            else:
-                pairs = word_pairs[new_word]
-
-            for pair in pairs:
-                pair_counts[pair] = pair_counts.get(pair, 0) + add_freq
-
-    return vocab, merges
+    return token_table, merges
