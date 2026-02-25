@@ -84,45 +84,32 @@ class Tokenizer:
             return tokens
 
         # TODO: Implement BPE algorithm
-        if len(tokens) <= 1:
-            return tokens
 
         while True:
-            pairs = self._get_pairs(tokens)
-            if not pairs:
-                break
-
-            # Find the best pair whose merged token exists in vocab
-            best_pair = None
             best_rank = None
+            best_index = None
 
-            for a, b in pairs:
-                merged = a + b
-                if merged in self.inverse_vocab:
-                    rank = self.inverse_vocab[merged]
-                    if best_rank is None or rank < best_rank:
-                        best_rank = rank
-                        best_pair = (a, b)
+            # ONE PASS instead of building set
+            for i in range(len(tokens) - 1):
+                merged = tokens[i] + tokens[i + 1]
 
-            if best_pair is None:
+                rank = self.inverse_vocab.get(merged)
+                if rank is None:
+                    continue
+
+                if best_rank is None or rank < best_rank:
+                    best_rank = rank
+                    best_index = i
+
+            if best_index is None:
                 break
 
-            # Merge all occurrences of best_pair
-            new_tokens = []
-            i = 0
-            while i < len(tokens):
-                if (
-                    i < len(tokens) - 1
-                    and tokens[i] == best_pair[0]
-                    and tokens[i + 1] == best_pair[1]
-                ):
-                    new_tokens.append(tokens[i] + tokens[i + 1])
-                    i += 2
-                else:
-                    new_tokens.append(tokens[i])
-                    i += 1
-
-            tokens = new_tokens
+            # merge directly
+            tokens = (
+                tokens[:best_index]
+                + [tokens[best_index] + tokens[best_index + 1]]
+                + tokens[best_index + 2 :]
+            )
 
         return tokens
 
@@ -180,14 +167,12 @@ class Tokenizer:
 
         ids = []
         # TODO: Implement encoding
+        inverse_vocab = self.inverse_vocab
+        bpe = self._bpe
+
         for match in self.pat.finditer(text):
-            piece = match.group()
-            piece_bytes = piece.encode("utf-8")
-
-            bpe_tokens = self._bpe(piece_bytes)
-
-            for tok in bpe_tokens:
-                ids.append(self.inverse_vocab[tok])
+            piece_bytes = match.group().encode("utf-8")
+            ids.extend(inverse_vocab[t] for t in bpe(piece_bytes))
 
         return ids
 

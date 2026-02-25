@@ -12,12 +12,23 @@ from typing import Optional, Dict, Any, Callable
 from pathlib import Path
 import time
 import sys
+try:
+    from tqdm.auto import tqdm
+except Exception:
+    tqdm = None
 
 _parent = str(Path(__file__).parent.parent)
 if _parent not in sys.path:
     sys.path.insert(0, _parent)
 
 from part3.nn_utils import cross_entropy, gradient_clipping
+
+
+def _progress(iterable, **kwargs):
+    """Use tqdm when available, otherwise return the raw iterable."""
+    if tqdm is None:
+        return iterable
+    return tqdm(iterable, **kwargs)
 
 
 @dataclass
@@ -67,7 +78,15 @@ class Trainer:
         self.model.train()
         total_loss = 0.0
         num_batches = 0
-        for batch in self.train_dataloader:
+        progress = _progress(
+            self.train_dataloader,
+            total=len(self.train_dataloader),
+            desc=f"Train {self.global_step // max(1, len(self.train_dataloader)) + 1}/{self.config.num_epochs}",
+            unit="batch",
+            dynamic_ncols=True,
+            leave=False,
+        )
+        for batch in progress:
             self.optimizer.zero_grad()
             loss = self.compute_loss_fn(batch, self.model)
             loss.backward()
@@ -77,6 +96,10 @@ class Trainer:
             total_loss += loss.item()
             num_batches += 1
             self.global_step += 1
+            if hasattr(progress, "set_postfix") and num_batches % max(1, self.config.log_interval) == 0:
+                progress.set_postfix(loss=f"{total_loss / num_batches:.4f}", lr=f"{self.optimizer.param_groups[0]['lr']:.2e}")
+        if hasattr(progress, "close"):
+            progress.close()
         return total_loss / num_batches if num_batches > 0 else 0.0
     
     @torch.no_grad()
@@ -86,10 +109,20 @@ class Trainer:
         self.model.eval()
         total_loss = 0.0
         num_batches = 0
-        for batch in self.val_dataloader:
+        progress = _progress(
+            self.val_dataloader,
+            total=len(self.val_dataloader),
+            desc="Validation",
+            unit="batch",
+            dynamic_ncols=True,
+            leave=False,
+        )
+        for batch in progress:
             loss = self.compute_loss_fn(batch, self.model)
             total_loss += loss.item()
             num_batches += 1
+        if hasattr(progress, "close"):
+            progress.close()
         return total_loss / num_batches if num_batches > 0 else 0.0
     
     def train(self) -> Dict[str, Any]:
