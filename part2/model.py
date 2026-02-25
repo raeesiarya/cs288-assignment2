@@ -97,6 +97,7 @@ class Embedding(nn.Module):
             Tensor of embeddings of shape (batch, seq_len, d_model)
         """
         # TODO: Implement embedding lookup
+        token_ids = token_ids.long()
         return self.weight[token_ids]
 
 
@@ -619,15 +620,10 @@ class MultiHeadSelfAttentionWithRoPE(nn.Module):
                 .unsqueeze(0)
                 .expand(batch_size, -1)
             )
+        else:
+            token_positions = token_positions.to(device=x.device, dtype=torch.long)
 
         # TODO: Implement multi-head self-attention with RoPE
-
-        if token_positions is None:
-            token_positions = (
-                torch.arange(seq_len, device=x.device)
-                .unsqueeze(0)
-                .expand(batch_size, -1)
-            )
 
         # Project
         Q = self.q_proj(x)

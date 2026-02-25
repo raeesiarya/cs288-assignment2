@@ -81,11 +81,14 @@ class PromptingPipeline:
 
     def _setup_choice_tokens(self):
         self.choice_tokens = {}
+        self.choice_token_sequences = {}
         for label in ["A", "B", "C", "D"]:
-            for prefix in ["", " "]:
-                token_ids = self.tokenizer.encode(prefix + label)
+            # Prefer space-prefixed forms since prompts typically end with "... answer is".
+            for candidate in [f" {label}", label]:
+                token_ids = self.tokenizer.encode(candidate)
                 if token_ids:
-                    self.choice_tokens[label] = token_ids[-1]
+                    self.choice_tokens[label] = token_ids[0]
+                    self.choice_token_sequences[label] = token_ids
                     break
 
     @torch.no_grad()
@@ -107,21 +110,44 @@ class PromptingPipeline:
         ):
             prompt_ids = prompt_ids[-self.max_context_length :]
 
-        input_ids = torch.tensor([prompt_ids], device=self.device)
-        logits = self.model(input_ids)[:, -1, :]
-
         choice_labels = ["A", "B", "C", "D"][: len(choices)]
-        choice_logits = []
-        vocab_size = logits.size(-1)
-        for label in choice_labels:
-            token_id = self.choice_tokens.get(label)
-            if token_id is not None and 0 <= token_id < vocab_size:
-                choice_logits.append(logits[0, token_id].item())
-            else:
-                choice_logits.append(float("-inf"))
+        choice_scores = []
 
-        choice_logits = torch.tensor(choice_logits)
-        probs = softmax(choice_logits, dim=-1)
+        for label in choice_labels:
+            label_tokens = self.choice_token_sequences.get(label)
+            if not label_tokens:
+                choice_scores.append(float("-inf"))
+                continue
+
+            running_ids = prompt_ids.copy()
+            score = 0.0
+            valid = True
+
+            # Score each answer label as an autoregressive token sequence.
+            for token_id in label_tokens:
+                if (
+                    self.max_context_length is not None
+                    and len(running_ids) > self.max_context_length
+                ):
+                    running_ids = running_ids[-self.max_context_length :]
+
+                input_ids = torch.tensor([running_ids], device=self.device)
+                logits = self.model(input_ids)[:, -1, :]
+                vocab_size = logits.size(-1)
+                if token_id < 0 or token_id >= vocab_size:
+                    valid = False
+                    break
+
+                score += torch.log_softmax(logits, dim=-1)[0, token_id].item()
+                running_ids.append(token_id)
+
+            choice_scores.append(score if valid else float("-inf"))
+
+        choice_scores = torch.tensor(choice_scores)
+        if torch.isfinite(choice_scores).any():
+            probs = softmax(choice_scores, dim=-1)
+        else:
+            probs = torch.full_like(choice_scores, 1.0 / len(choice_scores))
         prediction = probs.argmax().item()
 
         if return_probs:

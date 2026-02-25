@@ -22,8 +22,12 @@ def softmax(x: Tensor, dim: int = -1) -> Tensor:
     # used in part 2. But for this problem, you need to implement a numerically stable version to pass harder tests.
     x_max = x.max(dim=dim, keepdim=True).values
     x_shifted = x - x_max
+    x_shifted = torch.where(
+        torch.isfinite(x_shifted), x_shifted, torch.full_like(x_shifted, float("-inf"))
+    )
     exp_x = torch.exp(x_shifted)
-    return exp_x / exp_x.sum(dim=dim, keepdim=True)
+    denom = exp_x.sum(dim=dim, keepdim=True)
+    return torch.where(denom > 0, exp_x / denom, torch.zeros_like(exp_x))
 
 
 def cross_entropy(logits: Tensor, targets: Tensor) -> Tensor:
@@ -39,14 +43,9 @@ def cross_entropy(logits: Tensor, targets: Tensor) -> Tensor:
         Scalar tensor containing the mean cross-entropy loss
     """
     # TODO: Implement cross-entropy loss
-    x_max = logits.max(dim=-1, keepdim=True).values
-    logsumexp = (
-        torch.log(torch.exp(logits - x_max).sum(dim=-1, keepdim=True)) + x_max
-    )  # (N, 1)
+    logsumexp = torch.logsumexp(logits, dim=-1, keepdim=True)  # (N, 1)
     log_probs = logits - logsumexp  # (N, C)
-
-    # Gather log prob of the correct class
-    nll = -log_probs.gather(dim=-1, index=targets.unsqueeze(-1)).squeeze(-1)  # (N,)
+    nll = -log_probs.gather(dim=-1, index=targets.long().unsqueeze(-1)).squeeze(-1)
     return nll.mean()
 
 
@@ -160,18 +159,9 @@ def perplexity(logits: Tensor, targets: Tensor, ignore_index: int = -100) -> Ten
         tensor(3.)  # Equal to vocab_size (worst case for uniform)
     """
     # TODO: Implement perplexity
-    x_max = logits.max(dim=-1, keepdim=True).values
-    logsumexp = (
-        torch.log(torch.exp(logits - x_max).sum(dim=-1, keepdim=True)) + x_max
-    )  # (N, 1)
-    log_probs = logits - logsumexp  # (N, C)
-    nll = -log_probs.gather(dim=-1, index=targets.clamp_min(0).unsqueeze(-1)).squeeze(
-        -1
-    )  # (N,)
-
     valid = targets != ignore_index
     if valid.sum() == 0:
-        return torch.tensor(1.0, device=logits.device)
+        return torch.tensor(1.0, device=logits.device, dtype=logits.dtype)
 
-    ce = nll[valid].mean()
+    ce = cross_entropy(logits[valid], targets[valid])
     return torch.exp(ce)
